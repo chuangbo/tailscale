@@ -3,17 +3,20 @@
 // license that can be found in the LICENSE file.
 
 // Package kube provides a client to interact with Kubernetes.
+// This package is Tailscale-internal and not meant for external consumption.
+// Further, the API should not be considered stable.
 package kube
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -25,13 +28,13 @@ const (
 )
 
 func readFile(n string) ([]byte, error) {
-	return ioutil.ReadFile(filepath.Join(saPath, n))
+	return os.ReadFile(filepath.Join(saPath, n))
 }
 
 // Client handles connections to Kubernetes.
 // It expects to be run inside a cluster.
 type Client struct {
-	mu          sync.RWMutex
+	mu          sync.Mutex
 	url         string
 	ns          string
 	client      *http.Client
@@ -51,7 +54,7 @@ func New() (*Client, error) {
 	}
 	cp := x509.NewCertPool()
 	if ok := cp.AppendCertsFromPEM(caCert); !ok {
-		return nil, fmt.Errorf("error in creating root cert pool")
+		return nil, fmt.Errorf("kube: error in creating root cert pool")
 	}
 	return &Client{
 		url: defaultURL,
@@ -73,14 +76,12 @@ func (c *Client) expireToken() {
 }
 
 func (c *Client) getOrRenewToken() (string, error) {
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	tk, te := c.token, c.tokenExpiry
-	c.mu.RUnlock()
 	if time.Now().Before(te) {
 		return tk, nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	tkb, err := readFile("token")
 	if err != nil {
@@ -109,7 +110,7 @@ func getError(resp *http.Response) error {
 	return st
 }
 
-func (c *Client) doRequest(method, url string, in, out interface{}) error {
+func (c *Client) doRequest(ctx context.Context, method, url string, in, out interface{}) error {
 	tk, err := c.getOrRenewToken()
 	if err != nil {
 		return err
@@ -122,7 +123,7 @@ func (c *Client) doRequest(method, url string, in, out interface{}) error {
 		}
 		body = &b
 	}
-	req, err := http.NewRequest(method, url, body)
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
 	}
@@ -149,21 +150,21 @@ func (c *Client) doRequest(method, url string, in, out interface{}) error {
 }
 
 // GetSecret fetches the secret from the Kubernetes API.
-func (c *Client) GetSecret(name string) (*Secret, error) {
+func (c *Client) GetSecret(ctx context.Context, name string) (*Secret, error) {
 	s := &Secret{Data: make(map[string][]byte)}
-	if err := c.doRequest("GET", c.secretURL(name), nil, s); err != nil {
+	if err := c.doRequest(ctx, "GET", c.secretURL(name), nil, s); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
 // CreateSecret creates a secret in the Kubernetes API.
-func (c *Client) CreateSecret(in *Secret) error {
+func (c *Client) CreateSecret(ctx context.Context, in *Secret) error {
 	in.Namespace = c.ns
-	return c.doRequest("POST", c.secretURL(""), in, nil)
+	return c.doRequest(ctx, "POST", c.secretURL(""), in, nil)
 }
 
 // UpdateSecret updates a secret in the Kubernetes API.
-func (c *Client) UpdateSecret(in *Secret) error {
-	return c.doRequest("PUT", c.secretURL(in.Name), in, nil)
+func (c *Client) UpdateSecret(ctx context.Context, in *Secret) error {
+	return c.doRequest(ctx, "PUT", c.secretURL(in.Name), in, nil)
 }

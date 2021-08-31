@@ -6,6 +6,7 @@ package ipn
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"tailscale.com/atomicfile"
 	"tailscale.com/kube"
@@ -78,7 +80,10 @@ func (s *KubeStore) String() string { return "KubeStore" }
 
 // ReadState implements the StateStore interface.
 func (s *KubeStore) ReadState(id StateKey) ([]byte, error) {
-	secret, err := s.client.GetSecret(s.secretName)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	secret, err := s.client.GetSecret(ctx, s.secretName)
 	if err != nil {
 		if st, ok := err.(*kube.Status); ok && st.Code == 404 {
 			return nil, ErrStateNotExist
@@ -94,10 +99,13 @@ func (s *KubeStore) ReadState(id StateKey) ([]byte, error) {
 
 // WriteState implements the StateStore interface.
 func (s *KubeStore) WriteState(id StateKey, bs []byte) error {
-	secret, err := s.client.GetSecret(s.secretName)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	secret, err := s.client.GetSecret(ctx, s.secretName)
 	if err != nil {
 		if st, ok := err.(*kube.Status); ok && st.Code == 404 {
-			return s.client.CreateSecret(&kube.Secret{
+			return s.client.CreateSecret(ctx, &kube.Secret{
 				TypeMeta: kube.TypeMeta{
 					APIVersion: "v1",
 					Kind:       "Secret",
@@ -113,7 +121,7 @@ func (s *KubeStore) WriteState(id StateKey, bs []byte) error {
 		return err
 	}
 	secret.Data[string(id)] = bs
-	if err := s.client.UpdateSecret(secret); err != nil {
+	if err := s.client.UpdateSecret(ctx, secret); err != nil {
 		return err
 	}
 	return err
